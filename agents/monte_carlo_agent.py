@@ -12,11 +12,13 @@ import math
 @register_agent("student_agent")          # do not change this string
 class StudentAgent(Agent):
     def __init__(self):
-        ITERATIONS = 100
         """Set up your agent. This runs once per game, before the first move, and must finish
         within INIT_TIME_LIMIT seconds."""
         super().__init__()
         self.name = "StudentAgent"
+
+        # Set up Tree
+        
 
     def step(self, board, reserves, player, opponent):
         """Return the Move you want to play.

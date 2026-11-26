@@ -3,15 +3,16 @@
 from agents.agent import Agent
 from store import register_agent
 from helpers import (Move, get_valid_moves, execute_move, check_winner,
-                     check_endgame, random_move, copy_state, top_view)
+                     check_endgame, random_move, copy_state, top_view, render_text)
 from constants import *
 import numpy as np
 import time
 import math
 
 PRUNING_TIME = 0.5
-TIME_BUDGET = 1.6
-
+TIME_BUDGET = 1.9
+PRUNING = False
+RNG = np.random.default_rng()
 
 def reward_function(winner):
     if winner == PLAYER_1:
@@ -31,6 +32,7 @@ class StudentAgent(Agent):
         super().__init__()
         self.name = "StudentAgent"
         self.myturns = 0
+        self.mcts = MCTS()
 
     def step(self, board, reserves, player, opponent):
         """Return the Move you want to play.
@@ -52,13 +54,27 @@ class StudentAgent(Agent):
         ply = 2* self.myturns + (player - 1)
         self.myturns += 1
         try:
-            root_state = State(board, reserves, player, opponent, ply)
-            forced_mv, safe_moves = self.root_pruning(root_state, start)
+            current_state = State(board, reserves, player, opponent, ply)
+            if PRUNING:
+                forced_mv, safe_moves = self.root_pruning(current_state, start)
+            else:
+                forced_mv, safe_moves = None, get_valid_moves(board, reserves, player)
+
             if forced_mv is not None:
                 return forced_mv
             if safe_moves:
-                mcts = MCTS(root_state, safe_moves).Tree_policy(time_limit=start + TIME_BUDGET)
-                return mcts
+                if (self.mcts.root == None):
+                    # If root is none we start tree from scratch
+                    self.mcts.root = Node(current_state)
+                else:
+                    print("Current state : \n"  , current_state)
+                    print("Root state: \n"  , self.mcts.root.state)
+                    print("Root move: " , self.mcts.root.move)
+                    print("Root children : ", len(self.mcts.root.children))
+                    print("Tree discarded") if not self.mcts.find_state(current_state) else print("Tree preserved")
+                # mcts = MCTS(root_state, safe_moves).Tree_policy(time_limit=start + TIME_BUDGET)
+                move = self.mcts.get_move(safe_moves, time_limit = start + TIME_BUDGET)
+                return move
         except Exception as e:
             tb = e.__traceback__how
             while tb.tb_next is not None:
@@ -118,28 +134,52 @@ class StudentAgent(Agent):
         
 class MCTS:
 
-    def __init__(self, root_state, root_moves):
-        self.root =  Node(root_state)
+    def __init__(self):
+        # root init is done in "step"
+        self.root =  None
         self.rng = np.random.default_rng() 
-        self.root.untried_moves = [] 
-        for mv, child in root_moves:
-            self.root.children.append(Node(child, parent=self.root, move=mv))
+        # self.root.untried_moves = [] 
+        #for mv, child in root_moves:
+        #    self.root.children.append(Node(child, parent=self.root, move=mv))
 
 
+    def get_move(self, safe_moves, time_limit):
+        #TODO : implement move pruning (safe moves are being passed, but not being used currently). Need to remove every child node of the root from the tree before calling TP
+        #HACK : passing an argument for max iter forces that many iterations, keep at 0 for time constraint
+        return self.Tree_policy(time_limit, max_iter = 0)
 
 
-    def Tree_policy(self, time_limit):
-        iterations = 0  
-        while time.perf_counter() < time_limit:
+    def Tree_policy(self, time_limit, max_iter = 0):
+        # Keep the iteration logic, we need it to debug, don't pass an arg for submission
+        iterations = 0
+        while (time.perf_counter() < time_limit or iterations < max_iter):
             curr = self.select_node()
             result = self.random_rollout(curr)
             self.backpropagate(curr, winner=result)
             iterations += 1
     
-        best_move = self.select_best_move()
+        print("tree size", self.root.count_nodes())
+        best_move_node = self.select_best_move()
+        self.set_new_root(best_move_node)
         print(" iterations", iterations)
 
-        return best_move
+        return best_move_node.move
+
+    def set_new_root(self, node):
+        """Sets the chosen node (must be child of root) as the new root"""
+        assert node.parent is self.root
+        self.root = node
+        node.parent = None
+
+    def find_state(self, current_state) -> bool:
+        """Finds state amongst root children and sets it, If we have not anticipated the move, discard current tree and start from scratch
+        Returns true if state was found, false if we discard"""
+        for child in self.root.children:
+            if child.state == current_state:
+                self.set_new_root(child)
+                return True
+        self.root = Node(current_state)
+        return False
 
     def select_node(self):
         current = self.root
@@ -168,17 +208,33 @@ class MCTS:
     def select_best_move(self):
         """Selects the best child of the root"""
         # We don't use score here since we are uninterested in exploration 
-        return max(self.root.children, key=lambda c: (c.visits)).move
+        return max(self.root.children, key=lambda c: (c.visits))
 
     
-  
+    def truncated_rollout(self, curr):
+        #TODO : Implement and test
+        """Rollout strategy with eval function after a couple of moves played. Eval function needs to account for : 
+        pieces in a row
+        Covered pieces
+        Pieces in reserve
+        """
+        raise NotImplemented
 
     def random_rollout(self, curr):
         """plays random moves for both sides until we reach the end of a game, returns the winning player's number"""
         state = curr.state.copy()
-        while(not state.isTerminal()[0]):
+        for i in range(100 - state.ply):
+            # Bad, random move checks all available moves, very expensive
             move = random_move(state.board, state. reserves, state.player, self.rng)
+
+            if move is None:
+                return state.opponent # Player to move has no legal moves => they lost
+
             state.apply_move(move)
+            winner = check_winner(state.board, state.opponent)
+            if winner != 0:
+                return winner
+
         endgame = check_endgame(state.board, state.reserves, state.player, state.ply)
         return endgame[1]
 
@@ -188,19 +244,30 @@ class Node:
     C =0.7
 
     def __init__(self, state, parent=None, move=None):
-        self.state = state
-        self.parent = parent
+        self.state : State = state
+        self.parent  : Node = parent
         self.move = move
-        self.children = []
+        self.children :list [Node]= []
         self.score = 0
         self.wins = 0
         self.visits = 0
-        self.rng = np.random.default_rng()
+        # TODO : Get rid of this, a new rng for every node is crazy expensive, use one for MCTS and pass maybe, or a global one. Just not a new one every time.
+        self.rng = RNG
 
-        over, winner, _ = state.isTerminal()
-        self.winner = winner
-        self.over = over
+        self._winner = None
+        self._over = None
         self.untried_moves = None #only generate untried moves when we need to expand the node
+
+    @property
+    def over(self) -> bool: 
+        if self._over == None:
+            self._over, self._winner , _ = check_endgame(self.state.board, self.state.reserves, self.state.player, self.state.ply)
+        return self._over
+    @property
+    def winner(self) -> int:
+        if self._winner == None:
+            self._over, self._winner , _ = check_endgame(self.state.board, self.state.reserves, self.state.player, self.state.ply)
+        return self._winner
 
     def get_untried_moves(self):
         if self.untried_moves is None:
@@ -232,6 +299,14 @@ class Node:
         """returns True if this node corresponds to the end of the game"""
         return self.state.isTerminal()
 
+    def count_nodes(self):
+        if not self.children: return 1
+        children = 0
+        for child in self.children:
+            children += child.count_nodes()
+        return 1 + children
+
+
     
 class State:
     def __init__(self,board, reserves, player, opponent, ply):
@@ -241,6 +316,19 @@ class State:
         self.opponent = opponent
         self.ply = ply
 
+    def __eq__(self, other):
+        """Checks if two State objects are functionaly identical"""
+        # Needed for checking if we are in the right state when changing the root
+        if not isinstance(other, State):
+            raise NotImplemented
+        return (
+            self.player == other.player
+            and np.array_equal(self.board, other.board)
+            and np.array_equal(self.reserves, other.reserves)
+        )
+    def __str__(self):
+        return render_text(self.board, self.reserves)
+    
     def copy(self):
         # built in copy state method
         board_copy, reserves_copy = copy_state(self.board, self.reserves)
